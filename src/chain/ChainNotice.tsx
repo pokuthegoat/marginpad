@@ -1,4 +1,4 @@
-import { NETWORK_ERROR } from './config'
+import { NETWORK_ERROR, TARGET_CHAIN } from './config'
 import { useStore } from '../store/StoreContext'
 
 /** One line under a page title when the chain is not ready, or no wallet is connected. Uses the existing notice style. */
@@ -12,7 +12,9 @@ export default function ChainNotice() {
   } else if (chain.status === 'error') {
     text = `Can't reach ${chain.chainName} right now. Retrying…`
   } else if (!chain.connected) {
-    text = `Connect your wallet to use ${chain.chainName}. Testnet ETH only, no real funds.`
+    text = TARGET_CHAIN.testnet
+      ? `Connect your wallet to use ${chain.chainName}. Testnet ETH only, no real funds.`
+      : `Connect your wallet to use ${chain.chainName}. This uses real funds and the contracts are unaudited.`
   }
   if (!text) return null
   return (

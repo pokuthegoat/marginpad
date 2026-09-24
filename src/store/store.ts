@@ -234,6 +234,10 @@ export function closeOutcome(
 export function validateOpen(s: State, tokenId: string, collateral: number, leverage: number): string | null {
   const token = tokenById(tokenId)
   if (!(collateral > 0)) return null
+  if (token.source === 'pons' && !token.registered)
+    return `${token.symbol} was discovered on Pons, but Marginpad has not registered a market for it, so it cannot be traded yet.`
+  if (token.source === 'pons' && token.graduated)
+    return `${token.symbol} has graduated from its Pons bonding curve. No new positions can be opened on it.`
   if (s.stale[tokenId]) return `The ${token.symbol} oracle price is out of date. Ask the testnet oracle operator to push a new price.`
   if (collateral < MIN_COLLATERAL) return `The minimum is ${fmtEth(MIN_COLLATERAL)}.`
   if (collateral > s.wallet + EPS) return `You only have ${fmtEth(s.wallet)} in your wallet.`

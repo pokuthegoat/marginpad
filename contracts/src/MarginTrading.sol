@@ -15,6 +15,9 @@ import {ProtocolParams} from "./ProtocolParams.sol";
 import {Position, PositionStatus, Side} from "./Types.sol";
 import {
     BelowMinimumCollateral,
+    HoldPeriodNotElapsed,
+    InvalidRiskConfig,
+    MarketNotGraduated,
     NotLiquidatable,
     NotPositionOwner,
     OnlyPool,
@@ -61,7 +64,20 @@ contract MarginTrading is IMarginTrading, Ownable2Step, Pausable, ReentrancyGuar
     /// @notice Test ETH held to pay trader profits (and credited with trader losses). Not pool money.
     uint256 public reserve;
 
+    /// @notice Shortest time (seconds) a position must stay open before its owner may close it. It blunts the
+    ///         "pump a thin market, then close right after the oracle catches up" attack. Liquidations and graduated
+    ///         markets are exempt. Owner-set, at most 1 day.
+    uint256 public minHoldSeconds;
+
     mapping(uint256 id => Position) private _positions;
+
+    event ReserveFunded(address indexed by, uint256 amount, uint256 reserveAfter);
+    event ReserveWithdrawn(address indexed to, uint256 amount, uint256 reserveAfter);
+    /// @dev The reserve moved because a position settled: `delta` > 0 the reserve gained (trader loss), < 0 it paid out.
+    event ReserveSettled(uint256 indexed id, int256 delta, uint256 reserveAfter);
+    /// @dev A profit was larger than the reserve, so only `paid` of `wanted` was paid.
+    event ProfitCapped(uint256 indexed id, uint256 wanted, uint256 paid);
+    event MinHoldChanged(uint256 minHoldSeconds);
 
     constructor(IMarginPool pool_, IRiskManager riskManager_, address initialOwner) Ownable(initialOwner) {
         if (address(pool_) == address(0) || address(riskManager_) == address(0)) revert ZeroAddress();
@@ -86,6 +102,7 @@ contract MarginTrading is IMarginTrading, Ownable2Step, Pausable, ReentrancyGuar
     function fundReserve() external payable onlyOwner {
         if (msg.value == 0) revert ZeroAmount();
         reserve += msg.value;
+        emit ReserveFunded(msg.sender, msg.value, reserve);
     }
 
     /// @notice Owner only. Take test ETH back out of the reserve.
@@ -93,7 +110,15 @@ contract MarginTrading is IMarginTrading, Ownable2Step, Pausable, ReentrancyGuar
         if (amount == 0) revert ZeroAmount();
         if (amount > reserve) revert ReserveTooLarge();
         reserve -= amount;
+        emit ReserveWithdrawn(msg.sender, amount, reserve);
         Address.sendValue(payable(msg.sender), amount);
+    }
+
+    /// @notice Owner only. Set the minimum holding period before an owner may close a position (at most 1 day).
+    function setMinHoldSeconds(uint256 seconds_) external onlyOwner {
+        if (seconds_ > 1 days) revert InvalidRiskConfig();
+        minHoldSeconds = seconds_;
+        emit MinHoldChanged(seconds_);
     }
 
     /// @dev Only the pool may send plain ETH (the funds it lends). Everything else is rejected.
@@ -153,35 +178,57 @@ contract MarginTrading is IMarginTrading, Ownable2Step, Pausable, ReentrancyGuar
     }
 
     /// @inheritdoc IMarginTrading
+    /// @dev Owner only, and not before `minHoldSeconds` have passed (graduated markets are exempt).
     function closePosition(uint256 id) external override nonReentrant whenNotPaused {
         Position storage p = _positions[id];
         if (p.status != PositionStatus.Open) revert PositionNotOpen();
         if (p.owner != msg.sender) revert NotPositionOwner();
+        uint256 readyAt = uint256(p.openedAt) + minHoldSeconds;
+        if (block.timestamp < readyAt && !riskManager.isGraduated(p.market)) revert HoldPeriodNotElapsed(readyAt);
+        _close(id, p);
+    }
 
+    /// @notice Anyone may settle a position on a GRADUATED market at its frozen final price. The payout still goes to
+    ///         the position owner, so the caller gains nothing. It lets a keeper clear a market whose price source is
+    ///         gone, instead of leaving positions open against a price that will never update.
+    function settleGraduated(uint256 id) external nonReentrant whenNotPaused {
+        Position storage p = _positions[id];
+        if (p.status != PositionStatus.Open) revert PositionNotOpen();
+        if (!riskManager.isGraduated(p.market)) revert MarketNotGraduated(p.market);
+        _close(id, p);
+    }
+
+    /// @dev Settlement shared by closePosition and settleGraduated. Pays the position owner.
+    function _close(uint256 id, Position storage p) private {
         uint256 collateral = p.collateral;
         uint256 borrowed = p.borrowed;
+        address trader = p.owner;
         uint256 exitPrice = riskManager.validPrice(p.market);
         (uint256 profit, uint256 loss) = _pnl(p.side, p.entryPrice, exitPrice, collateral + borrowed);
 
         uint256 lpShare;
         uint256 payout;
         if (profit > 0) {
-            if (profit > reserve) profit = reserve; // testnet: pay only what the reserve can back
+            uint256 wanted = profit;
+            if (profit > reserve) profit = reserve; // pay only what the reserve can back
+            if (profit < wanted) emit ProfitCapped(id, wanted, profit);
             lpShare = pool.profitShare(profit);
             reserve -= profit;
             payout = collateral + profit - lpShare;
+            emit ReserveSettled(id, -int256(profit), reserve);
         } else {
             if (loss > collateral) loss = collateral; // the collateral absorbs the loss, never more
             reserve += loss;
             payout = collateral - loss;
+            emit ReserveSettled(id, int256(loss), reserve);
         }
 
         p.status = PositionStatus.Closed;
         marketBorrowed[p.market] -= borrowed;
-        emit PositionClosed(id, msg.sender, exitPrice, int256(profit) - int256(loss), lpShare, payout);
+        emit PositionClosed(id, trader, exitPrice, int256(profit) - int256(loss), lpShare, payout);
 
         if (borrowed > 0 || lpShare > 0) pool.repay{value: borrowed + lpShare}(borrowed, profit);
-        if (payout > 0) Address.sendValue(payable(msg.sender), payout);
+        if (payout > 0) Address.sendValue(payable(trader), payout);
     }
 
     /// @inheritdoc IMarginTrading
@@ -208,6 +255,7 @@ contract MarginTrading is IMarginTrading, Ownable2Step, Pausable, ReentrancyGuar
         p.status = PositionStatus.Liquidated;
         marketBorrowed[p.market] -= borrowed;
         reserve += size - value;
+        emit ReserveSettled(id, int256(size - value), reserve);
         emit PositionLiquidated(id, p.owner, msg.sender, exitPrice, equity, shortfall);
 
         if (repayAmount > 0) pool.repay{value: repayAmount}(repayAmount, 0);

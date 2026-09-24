@@ -70,3 +70,18 @@ error ReserveTooLarge();
 /// @dev The oracle price is older than the allowed maximum age.
 error StalePrice(address market, uint256 updatedAt);
 error NotLiquidatable();
+
+/*//////////////////////////////////////////////////////////////
+                 Production hardening (oracle, graduation, hold time)
+//////////////////////////////////////////////////////////////*/
+
+/// @dev Only the oracle updater (keeper) may do this.
+error NotUpdater();
+/// @dev The market was marked graduated: its price is frozen and accepts no more updates.
+error PriceFrozen(address market);
+/// @dev The market's price source is gone (graduated): no new positions.
+error MarketIsGraduated(address market);
+/// @dev A position cannot be closed by its owner until `readyAt` (minimum holding period).
+error HoldPeriodNotElapsed(uint256 readyAt);
+/// @dev settleGraduated only works on graduated markets.
+error MarketNotGraduated(address market);

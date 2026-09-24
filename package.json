@@ -16,7 +16,11 @@
     "chain:deploy": "node scripts/deploy-local.mjs",
     "chain:fund": "node scripts/fund-local.mjs",
     "local": "node scripts/local-up.mjs",
-    "test:chain": "node scripts/test-chain.mjs"
+    "test:chain": "node scripts/test-chain.mjs",
+    "pons:register": "node scripts/pons-mirror.mjs register",
+    "pons:mirror": "node scripts/pons-mirror.mjs mirror",
+    "pons:prepare": "node scripts/pons-prepare.mjs",
+    "verify:deployment": "node scripts/verify-deployment.mjs"
   },
   "dependencies": {
     "@fontsource-variable/dm-sans": "^5.3.0",

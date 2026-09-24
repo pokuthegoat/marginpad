@@ -1,10 +1,17 @@
 import { createPublicClient, formatEther, http, type Address } from 'viem'
 import { marginPoolAbi, marginTradingAbi, priceOracleAbi, riskManagerAbi } from './abis'
 import { TARGET_CHAIN, type Deployment } from './config'
-import { TOKENS, liquidationPrice, pnlFor, type Side } from '../store/market'
+import { allMarkets, liquidationPrice, pnlFor, type Side, type Token } from '../store/market'
 import type { ActivityEntry, Position, Settlement } from '../store/store'
 
-export const publicClient = createPublicClient({ chain: TARGET_CHAIN, transport: http(undefined, { batch: true }) })
+// JSON-RPC batching only on the local chain: the public Robinhood RPC has returned malformed batch responses under load.
+export const publicClient = createPublicClient({
+  chain: TARGET_CHAIN,
+  transport: http(undefined, TARGET_CHAIN.id === 31337 ? { batch: true } : { retryCount: 2 }),
+})
+
+/** The market id on the Marginpad contracts: the Pons token address for Pons markets, else the demo address. */
+const marketOf = (dep: Deployment, t: Token) => (t.address ?? dep.markets[t.symbol]) as Address
 
 /** wei -> ETH as a number (fine for display and validation; transactions use the exact bigint). */
 export const eth = (wei: bigint) => Number(formatEther(wei))
@@ -41,6 +48,8 @@ export interface ChainSnapshot {
   block: bigint
   /** Tokens whose oracle price is older than RiskManager.maxPriceAge (or was never set) */
   stale: Record<string, boolean>
+  /** Markets the oracle has marked graduated (price frozen, no new positions) */
+  graduated: Record<string, boolean>
   wallet: number
   totalDeposits: number
   totalBorrowed: number
@@ -131,14 +140,18 @@ export async function readSnapshot(dep: Deployment, user?: Address): Promise<Cha
     : Promise.resolve([0n, 0n, 0n] as const)
 
   const marketReads = Promise.all(
-    TOKENS.map(async (t) => {
-      const market = dep.markets[t.symbol]
-      const [[price, updatedAt], borrowed, r] = await Promise.all([
+    allMarkets().map(async (t) => {
+      const market = marketOf(dep, t)
+      const r = await read({ ...risk, functionName: 'marketRisk', args: [market] })
+      // A Pons launch Marginpad has NOT registered has nothing else to read: one call is all it costs.
+      if (!r.enabled && t.source === 'pons') return { t, price: 0n, updatedAt: 0n, borrowed: 0n, r, graduated: false }
+      const [[price, updatedAt], borrowed, graduated] = await Promise.all([
         read({ ...oracle, functionName: 'getPrice', args: [market] }),
         read({ ...trading, functionName: 'marketBorrowed', args: [market] }),
-        read({ ...risk, functionName: 'marketRisk', args: [market] }),
+        // Oracles without graduation support (or demo markets) simply are not graduated.
+        read({ ...oracle, functionName: 'graduated', args: [market] }).catch(() => false),
       ])
-      return { t, price, updatedAt, borrowed, r }
+      return { t, price, updatedAt, borrowed, r, graduated: graduated === true }
     }),
   )
 
@@ -160,12 +173,14 @@ export async function readSnapshot(dep: Deployment, user?: Address): Promise<Cha
   const priceUpdatedAt: Record<string, number> = {}
   const marketUsed: Record<string, number> = {}
   const stale: Record<string, boolean> = {}
+  const graduatedById: Record<string, boolean> = {}
   const riskById: Record<string, MarketRisk> = {}
   for (const m of markets) {
-    symbolOf.set(dep.markets[m.t.symbol].toLowerCase(), m.t.id)
+    symbolOf.set(marketOf(dep, m.t).toLowerCase(), m.t.id)
     prices[m.t.id] = priceOf(m.price)
     priceUpdatedAt[m.t.id] = Number(m.updatedAt)
-    stale[m.t.id] = m.price === 0n || latest.timestamp > m.updatedAt + maxPriceAge
+    stale[m.t.id] = m.price === 0n || (!m.graduated && latest.timestamp > m.updatedAt + maxPriceAge)
+    graduatedById[m.t.id] = m.graduated
     marketUsed[m.t.id] = eth(m.borrowed)
     riskById[m.t.id] = {
       enabled: m.r.enabled,
@@ -230,7 +245,7 @@ export async function readSnapshot(dep: Deployment, user?: Address): Promise<Cha
     const label = (id: bigint) => {
       const p = byId.get(Number(id))
       const t = p && symbolOf.get(p.market.toLowerCase())
-      return p && t ? `${p.side === 'long' ? 'Long' : 'Short'} on ${TOKENS.find((x) => x.id === t)!.symbol}` : 'Position'
+      return p && t ? `${p.side === 'long' ? 'Long' : 'Short'} on ${allMarkets().find((x) => x.id === t)!.symbol}` : 'Position'
     }
     const you = (a: Address | undefined) => !!user && !!a && a.toLowerCase() === user.toLowerCase()
 
@@ -328,7 +343,7 @@ export async function readSnapshot(dep: Deployment, user?: Address): Promise<Cha
   }
 
   // The chart: real oracle pushes, ending at the current price. Pad short histories with the current price.
-  for (const t of TOKENS) {
+  for (const t of allMarkets()) {
     const pts = priceHistory[t.id] ?? []
     if (pts[pts.length - 1] !== prices[t.id]) pts.push(prices[t.id])
     const trimmed = pts.slice(-HISTORY_POINTS)
@@ -339,6 +354,7 @@ export async function readSnapshot(dep: Deployment, user?: Address): Promise<Cha
   return {
     block: latest.number,
     stale,
+    graduated: graduatedById,
     wallet: eth(wallet),
     totalDeposits: eth(totalDeposits),
     totalBorrowed: eth(totalBorrowed),

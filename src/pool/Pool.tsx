@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Row, Segmented } from '../components/controls'
 import { useStore } from '../store/StoreContext'
 import ChainNotice from '../chain/ChainNotice'
+import { NETWORK_NOTE } from '../chain/config'
 import { floor4, fmtEth, fmtPct, fmtTime } from '../store/format'
 import { TOKENS } from '../store/market'
 import {
@@ -207,7 +208,7 @@ export default function Pool() {
             <button type="submit" className="btn btn-block btn-primary" disabled={!canSubmit}>
               {chain.busy ? 'Waiting for transaction…' : isDeposit ? 'Confirm deposit' : 'Confirm withdrawal'}
             </button>
-            <p className="fine">Robinhood Chain testnet only. No real funds.</p>
+            <p className="fine">{NETWORK_NOTE}</p>
           </form>
 
           {notice && (

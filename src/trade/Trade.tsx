@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react'
 import { Row, Segmented, Slider } from '../components/controls'
 import { useStore } from '../store/StoreContext'
 import ChainNotice from '../chain/ChainNotice'
+import { defaultMarketId } from '../pons/markets'
+import { usePonsDiscovery } from '../pons/usePonsDiscovery'
+import { NETWORK_NOTE, TARGET_CHAIN } from '../chain/config'
 import { fmtCompact, fmtEth, fmtPct, fmtPrice, fmtSignedEth, floor4 } from '../store/format'
 import { TOKENS, isLiquidated, liquidationPrice, pnlFor, sizeFor, tokenById, type Side, type Token } from '../store/market'
 import { LP_PROFIT_SHARE, borrowRoom, closeOutcome, validateOpen, type Settlement } from '../store/store'
@@ -41,6 +44,41 @@ function Sparkline({ points }: { points: number[] }) {
   )
 }
 
+/** Small tags that keep the three Pons ideas apart: discovered (not registered), registered/tradable, graduated. */
+function ponsBadge(t: Token) {
+  if (t.graduated) return 'Pons · graduated'
+  if (!t.registered) return 'Pons · not registered'
+  return TARGET_CHAIN.testnet ? 'Pons · testnet synthetic' : 'Pons'
+}
+
+function ponsChipLabel(t: Token) {
+  if (t.graduated) return 'Pons · graduated · '
+  if (!t.registered) return 'Pons · not registered · '
+  return TARGET_CHAIN.testnet ? 'Pons synthetic · ' : 'Pons · '
+}
+
+function ponsNote(t: Token) {
+  if (t.graduated && !t.registered) {
+    return 'This token graduated from its Pons bonding curve, and Marginpad has no market for it.'
+  }
+  if (t.graduated) {
+    return 'This token graduated from its Pons bonding curve, so no new positions can be opened. Its Marginpad price is frozen at the final curve price, and open positions settle at that price.'
+  }
+  if (!t.registered) {
+    return 'Discovered on Pons. Marginpad has not registered a market for this token, so it cannot be traded yet. The price shown is the Pons curve price (before fees), for reference only.'
+  }
+  return TARGET_CHAIN.testnet
+    ? 'Synthetic testnet market. The price mirrors this token’s Pons bonding curve on Robinhood Chain mainnet (before fees). Positions use test ETH only and nothing trades on mainnet.'
+    : 'The price mirrors this token’s Pons bonding curve (before fees), pushed by a keeper. If the token graduates, new positions stop and open ones settle at the final curve price.'
+}
+
+/** Demo markets are priced in demo USD. Pons markets are priced in ETH straight from their curve. */
+function priceText(t: Token, p: number) {
+  if (t.source !== 'pons') return fmtPrice(p)
+  if (!(p > 0)) return 'no price'
+  return `${p.toLocaleString('en-US', { maximumSignificantDigits: 4, maximumFractionDigits: 20, useGrouping: false })} ETH`
+}
+
 function SettlementCard({ s }: { s: Settlement }) {
   const t = tokenById(s.tokenId)
   const profit = s.kind === 'closed' && s.pnl > 0
@@ -77,9 +115,12 @@ function SettlementCard({ s }: { s: Settlement }) {
 }
 
 export default function Trade() {
-  const { state, actions, chain } = useStore()
+  const { state, actions, chain, markets } = useStore()
   const ready = chain.status === 'ready' && chain.connected && !chain.busy
-  const [selectedId, setSelectedId] = useState(TOKENS[1].id)
+  usePonsDiscovery()
+  // Until the user picks a market: the first tradable Pons market, otherwise the first market in the list.
+  const [picked, setPicked] = useState<string | null>(null)
+  const selectedId = picked && markets.some((m) => m.id === picked) ? picked : defaultMarketId(markets, TOKENS[1].id)
   const [side, setSide] = useState<Side>('long')
   const [amountText, setAmountText] = useState('')
   const [leverage, setLeverage] = useState(1.5)
@@ -87,10 +128,22 @@ export default function Trade() {
 
   // The market list under the search box. This only changes which chips are shown: the selected market, its card and
   // the ticket below are untouched (and stay put even if the selected market is filtered out of the list).
-  const visibleMarkets = useMemo(() => filterMarkets(TOKENS, state.prices, mq), [state.prices, mq])
+  const visibleMarkets = useMemo(() => filterMarkets(markets, state.prices, mq), [markets, state.prices, mq])
   const clearMarketFilters = () => setMq(NO_FILTERS)
 
-  const token = tokenById(selectedId)
+  const token = selectedId ? tokenById(selectedId) : undefined
+  if (!token) {
+    return (
+      <main className="wrap stack">
+        <div className="title">
+          <p className="eyebrow">Trade</p>
+          <h1 className="t-h1">No markets yet</h1>
+          <ChainNotice />
+          <p className="lead">No markets are registered on this network yet.</p>
+        </div>
+      </main>
+    )
+  }
   const price = state.prices[token.id]
   const room = borrowRoom(state, token.id)
 
@@ -102,10 +155,12 @@ export default function Trade() {
   const liqDistance = Math.abs(liq - price) / price
 
   const error = amountOk ? validateOpen(state, token.id, amount, leverage) : null
-  const canOpen = amountOk && !error && ready
+  const isPons = token.source === 'pons'
+  const notTradable = isPons && (!token.registered || !!token.graduated)
+  const canOpen = amountOk && !error && ready && !notTradable
 
   const selectToken = (t: Token) => {
-    setSelectedId(t.id)
+    setPicked(t.id)
     setLeverage((l) => Math.min(l, t.maxLeverage))
   }
 
@@ -193,7 +248,7 @@ export default function Trade() {
         </div>
 
         <p className="help tools-count" aria-live="polite">
-          Showing {visibleMarkets.length} of {TOKENS.length} markets
+          Showing {visibleMarkets.length} of {markets.length} markets
           {mq.filter !== 'all' && ` · max leverage ${mq.filter === 'low' ? 'up to' : 'above'} ${LOW_LEVERAGE_MAX}x`}
           {mq.sortKey !== 'default' && ` · ${SORT_LABEL[mq.sortKey]}, ${mq.sortDir === 'desc' ? 'high to low' : 'low to high'}`}
         </p>
@@ -223,7 +278,8 @@ export default function Trade() {
             >
               <b>{t.symbol}</b>
               <small className="num">
-                {fmtPrice(state.prices[t.id])} · {t.maxLeverage}x
+                {t.source === 'pons' ? ponsChipLabel(t) : ''}
+                {priceText(t, state.prices[t.id])} · {t.maxLeverage}x
               </small>
             </button>
           ))}
@@ -234,22 +290,23 @@ export default function Trade() {
         <div>
           <h2>
             {token.name} <span>{token.symbol}</span>
+            {isPons && <span className="badge">{ponsBadge(token)}</span>}
           </h2>
-          <p className="price num">{fmtPrice(price)}</p>
+          <p className="price num">{priceText(token, price)}</p>
         </div>
         <Sparkline points={state.history[token.id]} />
         <dl className="stats">
           <div>
             <dt>Market cap</dt>
-            <dd className="num">{fmtCompact(token.marketCap)}</dd>
+            <dd className="num">{isPons ? '—' : fmtCompact(token.marketCap)}</dd>
           </div>
           <div>
             <dt>Liquidity</dt>
-            <dd className="num">{fmtCompact(token.liquidity)}</dd>
+            <dd className="num">{isPons ? '—' : fmtCompact(token.liquidity)}</dd>
           </div>
           <div>
             <dt>24h volume</dt>
-            <dd className="num">{fmtCompact(token.volume24h)}</dd>
+            <dd className="num">{isPons ? '—' : fmtCompact(token.volume24h)}</dd>
           </div>
           <div>
             <dt>Max leverage</dt>
@@ -260,7 +317,12 @@ export default function Trade() {
             <dd className="num">{fmtEth(room)}</dd>
           </div>
         </dl>
-        {chain.isOracleOwner && (
+        {isPons && (
+          <p className="help">
+            {ponsNote(token)}
+          </p>
+        )}
+        {chain.isOracleOwner && !isPons && (
         <div className="demo-ctl">
           <span>Testnet oracle: move the {token.symbol} price</span>
           {[-0.5, -0.3, -0.1, 0.1, 0.3].map((pct) => (
@@ -353,22 +415,22 @@ export default function Trade() {
           <Row label="Pool capital used" value={fmtEth(borrowed)} />
           <Row label="Selected leverage" value={`${leverage.toFixed(1)}x`} />
           <Row label="Total position size" value={fmtEth(size)} strong />
-          <Row label="Entry price" value={fmtPrice(price)} />
+          <Row label="Entry price" value={priceText(token, price)} />
           <div>
             <dt>Est. liquidation price</dt>
             <dd className="num loss">
-              {fmtPrice(liq)}
+              {priceText(token, liq)}
               <small> {(liqDistance * 100).toFixed(1)}% {side === 'long' ? 'below' : 'above'}</small>
             </dd>
           </div>
         </dl>
 
         <button type="submit" className={`btn btn-block btn-${side}`} disabled={!canOpen}>
-          {chain.busy ? 'Waiting for transaction…' : 'Open Position'}
+          {notTradable ? (token.graduated ? 'Graduated: no new positions' : 'Trading not available yet') : chain.busy ? 'Waiting for transaction…' : 'Open Position'}
         </button>
         <p className="fine">
           Your collateral absorbs losses first. If a trade closes in profit, 5% of the profit goes to pool providers.
-          Robinhood Chain testnet only. No real funds.
+          {NETWORK_NOTE}
         </p>
       </form>
 
@@ -411,9 +473,9 @@ export default function Trade() {
                     <Row label="Position size" value={fmtEth(p.size)} />
                     <Row label="Collateral" value={fmtEth(p.collateral)} />
                     <Row label="From pool" value={fmtEth(p.borrowed)} />
-                    <Row label="Entry" value={fmtPrice(p.entry)} />
-                    <Row label="Current" value={fmtPrice(mark)} />
-                    <Row label="Liquidation" value={fmtPrice(p.liq)} />
+                    <Row label="Entry" value={priceText(t, p.entry)} />
+                    <Row label="Current" value={priceText(t, mark)} />
+                    <Row label="Liquidation" value={priceText(t, p.liq)} />
                   </dl>
                   <p className="sub-title">If you close now</p>
                   <dl className="group">

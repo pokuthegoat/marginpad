@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { parseEther, parseEventLogs, type Address, type TransactionReceipt } from 'viem'
 import { marginPoolAbi, marginTradingAbi, priceOracleAbi } from '../chain/abis'
 import { TARGET_CHAIN, explorerTx, getDeployment } from '../chain/config'
@@ -6,7 +6,10 @@ import { publicClient, readSnapshot, type ChainSnapshot } from '../chain/read'
 import { describeError, submit, type WriteRequest } from '../chain/tx'
 import { useWalletAccess } from '../chain/wallet'
 import { fmtEth, fmtPrice } from './format'
-import { TOKENS, applyOnchainRisk, sizeFor, tokenById, type Side } from './market'
+import { TOKENS, applyOnchainRisk, setDemoMarketsEnabled, setExtraMarkets, sizeFor, tokenById, type Side, type Token } from './market'
+import { getPonsDiscovery } from '../pons/discover'
+import { applyPonsStatus, mergePonsTokens, orderMarkets } from '../pons/markets'
+import { registryTokens } from '../pons/registered'
 import { createBlankState, type Notice, type State } from './store'
 
 export type ChainStatus = 'loading' | 'ready' | 'no-deployment' | 'error'
@@ -39,11 +42,14 @@ interface Store {
   state: State
   actions: Actions
   chain: ChainInfo
+  /** Every market shown on Trade: the demo markets plus any Pons markets with a live price */
+  markets: Token[]
 }
 
 const StoreContext = createContext<Store | null>(null)
 
 const POLL_MS = 5_000
+const marketOf = (dep: { markets: Record<string, Address> }, t: Token) => (t.address ?? dep.markets[t.symbol]) as Address
 const bps = (n: number) => BigInt(Math.round(n * 10_000))
 /** ETH amount from the UI (a float) to wei, without float noise. */
 const toWei = (n: number) => parseEther(n.toFixed(8))
@@ -56,10 +62,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<ChainStatus>(dep ? 'loading' : 'no-deployment')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
+  // Markets listed in the registry file for this chain: only a starting point, the chain says what is really registered.
+  const [registry] = useState<Token[]>(() => {
+    // Demo markets exist on local and testnet deployments only. A mainnet deployment has none.
+    setDemoMarketsEnabled(!!TARGET_CHAIN.testnet)
+    return registryTokens(TARGET_CHAIN.id)
+  })
+  // Pons launches found automatically by discovery (it polls only while the Trade page is open; the result is cached).
+  const discovery = getPonsDiscovery()
+  const discovered = useSyncExternalStore(discovery.subscribe, discovery.getSnapshot)
   const busyRef = useRef(false)
   const noticeId = useRef(1)
   const requestId = useRef(0)
   const snapRef = useRef<ChainSnapshot | null>(null)
+  const ponsRef = useRef<Token[]>([])
+
+  // Pons markets = discovered launches + registry entries. Discovery only says a launch EXISTS and is eligible; `registered` and
+  // `ponsState` come from the Marginpad chain snapshot and are re-applied here whenever the list is rebuilt.
+  const ponsMarkets = useMemo(() => {
+    const tokens = mergePonsTokens(discovered.markets, registry)
+    setExtraMarkets(tokens) // the module-level lookup used by tokenById(); an idempotent assignment
+    const last = snapRef.current
+    if (last) for (const [id, r] of Object.entries(last.risk)) if (r.enabled) applyOnchainRisk(id, r)
+    applyPonsStatus(tokens, last)
+    ponsRef.current = tokens
+    return tokens
+  }, [discovered.markets, registry])
 
   const refresh = useCallback(async () => {
     if (!dep) return
@@ -68,7 +96,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const s = await readSnapshot(dep, wallet.address)
       if (n !== requestId.current) return // a newer read is already in flight
       // The contract is the source of truth for max leverage, maintenance margin and the pool cap.
-      for (const [id, r] of Object.entries(s.risk)) applyOnchainRisk(id, r)
+      for (const [id, r] of Object.entries(s.risk)) if (r.enabled) applyOnchainRisk(id, r)
+      applyPonsStatus(ponsRef.current, s)
       snapRef.current = s
       setSnap(s)
       setStatus('ready')
@@ -85,11 +114,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(timer)
   }, [refresh])
 
+  // A new or changed Pons market: read its Marginpad registration status right away instead of waiting for the next poll.
+  useEffect(() => {
+    void refresh()
+  }, [ponsMarkets, refresh])
+
   const state = useMemo<State>(() => {
     const base = createBlankState()
+    // Pons markets have no Marginpad contract data: their price comes from the Pons curve, and nothing is borrowed.
+    for (const t of ponsMarkets) {
+      base.prices[t.id] = t.price
+      base.history[t.id] = [t.price, t.price]
+      base.marketUsed[t.id] = 0
+    }
     if (!snap) return { ...base, notice }
     const history: Record<string, number[]> = {}
-    for (const t of TOKENS) history[t.id] = snap.priceHistory[t.id] ?? base.history[t.id]
+    // Unregistered Pons markets have no oracle price (0): they keep the display price from the Pons curve.
+    const prices = { ...base.prices }
+    for (const [id, p] of Object.entries(snap.prices)) if (p > 0) prices[id] = p
+    for (const t of [...(TARGET_CHAIN.testnet ? TOKENS : []), ...ponsMarkets]) {
+      history[t.id] = snap.prices[t.id] > 0 ? (snap.priceHistory[t.id] ?? base.history[t.id]) : base.history[t.id]
+    }
     return {
       ...base,
       wallet: snap.wallet,
@@ -97,16 +142,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       rewardPool: snap.rewardPool,
       userDeposit: snap.userDeposit,
       userRewards: snap.userRewards,
-      marketUsed: snap.marketUsed,
-      prices: snap.prices,
-      history,
+      marketUsed: { ...base.marketUsed, ...snap.marketUsed },
+      prices,
+      history: { ...base.history, ...history },
       stale: snap.stale,
       positions: snap.positions,
       settlements: snap.settlements,
       activity: snap.activity,
       notice,
     }
-  }, [snap, notice])
+  }, [snap, notice, ponsMarkets])
 
   const say = useCallback((scope: Notice['scope'], kind: Notice['kind'], text: string) => {
     setNotice({ id: noticeId.current++, scope, kind, text })
@@ -157,8 +202,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     return {
       open: (tokenId, side, collateral, leverage) => {
+        if (tokenById(tokenId).source === 'pons' && !tokenById(tokenId).registered)
+          return Promise.resolve(say('trade', 'bad', 'Pons markets are not tradable yet.'))
         const { size, borrowed } = sizeFor(collateral, leverage)
-        const market = dep?.markets[tokenById(tokenId).symbol]
+        const market = dep && marketOf(dep, tokenById(tokenId))
         return run(
           'trade',
           trading && market
@@ -213,7 +260,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         })),
 
       nudge: async (tokenId, pct) => {
-        const market = dep?.markets[tokenById(tokenId).symbol]
+        if (tokenById(tokenId).source === 'pons') return
+        const market = dep && marketOf(dep, tokenById(tokenId))
         if (!dep || !market) return
         const [raw] = await publicClient.readContract({
           address: dep.priceOracle,
@@ -229,7 +277,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         )
       },
     }
-  }, [dep, run])
+  }, [dep, run, say])
 
   const chain = useMemo<ChainInfo>(
     () => ({
@@ -243,7 +291,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [status, wallet, busy, snap],
   )
 
-  const value = useMemo(() => ({ state, actions, chain }), [state, actions, chain])
+  // Statuses live on the (mutated) token objects, so the list is rebuilt whenever the chain snapshot changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const markets = useMemo(() => orderMarkets(TOKENS, ponsMarkets, !!TARGET_CHAIN.testnet), [ponsMarkets, snap])
+  const value = useMemo(() => ({ state, actions, chain, markets }), [state, actions, chain, markets])
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
 }
 

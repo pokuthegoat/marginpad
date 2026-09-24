@@ -14,6 +14,7 @@ import {
     LeverageTooLow,
     MarketBorrowCapExceeded,
     MarketDisabled,
+    MarketIsGraduated,
     NoPrice,
     OracleNotSet,
     StalePrice,
@@ -78,17 +79,30 @@ contract RiskManager is IRiskManager, Ownable2Step {
     }
 
     /// @inheritdoc IRiskManager
+    /// @dev A graduated market (its price source is gone) returns its frozen FINAL price without the age check, as a
+    ///      one-time settlement price only: `validateOpen` refuses new positions on it. Everything else must be fresh.
     function validPrice(address market) public view override returns (uint256 price) {
         if (address(oracle) == address(0)) revert OracleNotSet();
         uint256 updatedAt;
         (price, updatedAt) = oracle.getPrice(market);
         if (price == 0) revert NoPrice(market);
+        if (isGraduated(market)) return price;
         if (block.timestamp > updatedAt + maxPriceAge) revert StalePrice(market, updatedAt);
     }
 
     /// @inheritdoc IRiskManager
+    /// @dev Asks the oracle through a low-level call, so oracles without a `graduated(address)` function (or no oracle
+    ///      at all) simply mean "not graduated".
+    function isGraduated(address market) public view override returns (bool) {
+        if (address(oracle) == address(0) || address(oracle).code.length == 0) return false;
+        (bool ok, bytes memory ret) = address(oracle).staticcall(abi.encodeWithSignature("graduated(address)", market));
+        return ok && ret.length == 32 && abi.decode(ret, (bool));
+    }
+
+    /// @inheritdoc IRiskManager
     function setMaxPriceAge(uint256 newMaxAge) external override onlyOwner {
-        if (newMaxAge == 0) revert InvalidRiskConfig();
+        // Bounded so it can be neither zero-ish (everything reverts) nor days long (stale prices accepted).
+        if (newMaxAge < 10 || newMaxAge > 7 days) revert InvalidRiskConfig();
         maxPriceAge = newMaxAge;
         emit MaxPriceAgeUpdated(newMaxAge);
     }
@@ -120,6 +134,7 @@ contract RiskManager is IRiskManager, Ownable2Step {
     ) external view override returns (uint256 borrowAmount) {
         MarketRisk memory r = _marketRisk[market];
         if (!r.enabled) revert MarketDisabled(market);
+        if (isGraduated(market)) revert MarketIsGraduated(market);
         if (leverageBps < ProtocolParams.MIN_LEVERAGE_BPS) revert LeverageTooLow(leverageBps);
         if (leverageBps > r.maxLeverageBps) revert LeverageTooHigh(leverageBps, r.maxLeverageBps);
 

@@ -7,6 +7,8 @@
  *   npm run contracts:sync
  *   npm run test:chain
  */
+import fs from 'node:fs'
+import path from 'node:path'
 import { createWalletClient, http, parseEther, type Address } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { describe, expect, it } from 'vitest'
@@ -14,6 +16,8 @@ import { marginPoolAbi, marginTradingAbi, priceOracleAbi } from './abis'
 import { TARGET_CHAIN, getDeployment } from './config'
 import { publicClient, readSnapshot, toPosition } from './read'
 import { describeError, submit } from './tx'
+import { registryTokens } from '../pons/registered'
+import { setExtraMarkets } from '../store/market'
 
 // Anvil's well-known dev accounts (public keys; local chain only).
 const DEPLOYER = privateKeyToAccount('0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80')
@@ -156,5 +160,51 @@ run('frontend chain layer against local Anvil', () => {
     expect(p.size).toBe(4)
     expect(p.liq).toBeCloseTo(0.55, 9)
     expect(p.openedAt).toBe(100_000)
+  })
+
+  it('synthetic Pons markets (registered by scripts/pons-mirror.mjs) trade like any market', async () => {
+    const file = path.join(process.cwd(), 'src/chain/pons-markets.local.json')
+    if (!fs.existsSync(file)) return // nothing registered: run `npm run pons:register`
+    const tokens = registryTokens(TARGET_CHAIN.id)
+    setExtraMarkets(tokens)
+    expect(tokens.length).toBeGreaterThan(0)
+    const pons = tokens[0]
+    const market = pons.address as Address
+    const move = async (factor: number) => {
+      const [raw] = await publicClient.readContract({ address: dep.priceOracle, abi: priceOracleAbi, functionName: 'getPrice', args: [market] })
+      await send(DEPLOYER, { address: dep.priceOracle, abi: priceOracleAbi, functionName: 'setPrice', args: [market, (raw * BigInt(Math.round(factor * 10_000))) / 10_000n] })
+    }
+    const open = (side: number) =>
+      send(TRADER, { address: dep.marginTrading, abi: marginTradingAbi, functionName: 'openPosition', args: [market, side, 15_000n], value: parseEther('1') })
+
+    await send(TRADER, { address: dep.marginPool, abi: marginPoolAbi, functionName: 'deposit', value: parseEther('10') })
+    const s0 = await readSnapshot(dep, TRADER.address)
+    expect(s0.prices[pons.id]).toBeGreaterThan(0)
+    expect(s0.stale[pons.id]).toBe(false)
+    expect(s0.risk[pons.id].maxLeverage).toBe(1.5)
+
+    // profitable long, closed
+    await open(0)
+    let snap = await readSnapshot(dep, TRADER.address)
+    const long = snap.positions.find((p) => p.tokenId === pons.id)!
+    expect(long.borrowed).toBe(0.5)
+    expect(long.entry).toBeCloseTo(s0.prices[pons.id], 15)
+    await move(1.1)
+    await send(TRADER, { address: dep.marginTrading, abi: marginTradingAbi, functionName: 'closePosition', args: [BigInt(long.id)] })
+    snap = await readSnapshot(dep, TRADER.address)
+    expect(snap.settlements[0].id).toBe(long.id)
+    expect(snap.settlements[0].kind).toBe('closed')
+    expect(snap.settlements[0].pnl).toBeGreaterThan(0)
+
+    // short liquidated
+    await open(1)
+    snap = await readSnapshot(dep, TRADER.address)
+    const short = snap.positions.find((p) => p.tokenId === pons.id)!
+    await move(1.6)
+    await send(DEPLOYER, { address: dep.marginTrading, abi: marginTradingAbi, functionName: 'liquidate', args: [BigInt(short.id)] })
+    snap = await readSnapshot(dep, TRADER.address)
+    expect(snap.settlements[0].id).toBe(short.id)
+    expect(snap.settlements[0].kind).toBe('liquidated')
+    await move(1 / (1.1 * 1.6)) // restore the mirrored price
   })
 })

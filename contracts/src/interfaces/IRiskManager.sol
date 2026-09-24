@@ -59,7 +59,10 @@ interface IRiskManager {
     /// @notice The current oracle price for `market`. Reverts if there is no oracle, no price, or the price is stale.
     function validPrice(address market) external view returns (uint256);
 
-    /// @notice Owner only. Set how old an oracle price may be. Must be non-zero.
+    /// @notice Whether the market price source is gone (graduated). No new positions; the price is a frozen final value.
+    function isGraduated(address market) external view returns (bool);
+
+    /// @notice Owner only. Set how old an oracle price may be (10 seconds to 7 days).
     function setMaxPriceAge(uint256 newMaxAge) external;
 
     /// @notice Owner only. Point the manager at a price source. `address(0)` means "not set yet".

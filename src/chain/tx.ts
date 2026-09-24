@@ -30,7 +30,11 @@ const REASONS: Record<string, string> = {
   PositionNotOpen: 'This position is already closed.',
   NotPositionOwner: 'Only the position owner can close it.',
   EnforcedPause: 'The contracts are paused.',
-  OwnableUnauthorizedAccount: 'Only the testnet oracle operator can do that.',
+  OwnableUnauthorizedAccount: 'Only the oracle operator can do that.',
+  NotUpdater: 'Only the price keeper can do that.',
+  MarketIsGraduated: 'This Pons token has graduated from its bonding curve, so no new positions can be opened on it.',
+  PriceFrozen: 'This market has graduated: its price is frozen.',
+  MarketNotGraduated: 'This market has not graduated.',
 }
 
 /**
@@ -47,7 +51,11 @@ export function describeError(e: unknown): string {
     const raw = e.walk((x) => typeof (x as { data?: unknown }).data === 'string' && (x as { data: string }).data.startsWith('0x'))
     if (raw) {
       try {
-        const { errorName } = decodeErrorResult({ abi: ERROR_ABI, data: (raw as unknown as { data: Hex }).data })
+        const { errorName, args } = decodeErrorResult({ abi: ERROR_ABI, data: (raw as unknown as { data: Hex }).data })
+        if (errorName === 'HoldPeriodNotElapsed' && args?.[0] !== undefined) {
+          const left = Math.max(0, Number(args[0]) - Math.floor(Date.now() / 1000))
+          return `Positions have a minimum holding period. This one can be closed in about ${left} seconds.`
+        }
         return REASONS[errorName] ?? `The contract rejected this: ${errorName}.`
       } catch {
         // not a known contract error: fall through to viem's message

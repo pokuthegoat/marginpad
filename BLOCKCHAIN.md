@@ -179,3 +179,43 @@ cd .. && npm run contracts:sync      # then commit src/chain/deployments.json
 ```
 
 Only the wallet that owns the oracle (the deployer) sees the "move the price" controls on /trade.
+
+## Production hardening (mainnet preparation, NOT deployed)
+
+Nothing has been deployed to Robinhood Chain mainnet (4663) and the frontend does not target it unless a build sets both
+`VITE_CHAIN_ID=4663` and `VITE_ALLOW_MAINNET=true`. The contracts are unaudited. Passing tests is not a safety guarantee.
+
+- **Oracle** (`OwnerPriceOracle`): a separate `updater` (keeper) pushes prices; the owner rotates it. A single update may move a
+  price at most `maxMoveBps` (an oversized update is rejected: price unchanged, `PriceRejected` emitted, `false` returned, so the keeper
+  steps toward the target). `pause()` stops updates and hides prices, which halts open, close and liquidate.
+- **Freshness:** `RiskManager.maxPriceAge` (10 s to 7 days) rejects old prices with `StalePrice` on open, close and liquidate.
+- **Graduation:** the keeper calls `markGraduated(market)` when a Pons curve graduates. The price freezes at its final value, new positions
+  are refused (`MarketIsGraduated`), owners may close immediately, and anyone may call `MarginTrading.settleGraduated(id)` (payout still goes to
+  the owner). There is NO post-graduation price source (Uniswap v4 pricing is unverified), so settle graduated positions promptly.
+- **Hold period:** `MarginTrading.minHoldSeconds` blocks an owner from closing right after opening (liquidation and graduated markets are exempt).
+- **Reserve:** funding and withdrawal are owner-only and emit events; a profit larger than the reserve is capped (`ProfitCapped`); every settlement emits `ReserveSettled`.
+- **Per-chain deploy defaults** (`script/Deploy.s.sol`): mainnet 120 s max price age, 10% max move per update, 300 s hold, reserve 0, no demo markets, needs
+  `CONFIRM_MAINNET`, an owner that is not the deployer (a multisig) and a separate keeper address. The deployment json records chain, addresses, updater, markets,
+  risk parameters and protection settings.
+- **Keeper:** `node scripts/pons-mirror.mjs mirror` (see its header). Registering markets on mainnet is an owner-multisig action and is not scripted.
+- Mainnet runbook and read-only verification: docs/mainnet-runbook.md (npm run pons:prepare, verify:deployment)
+
+## Automatic Pons market discovery (/trade)
+
+`/trade` discovers eligible Pons V2 launches by itself (read-only, from Robinhood Chain mainnet) and shows them next to the Marginpad markets.
+Discovery is not registration: three states are kept apart.
+
+| State | Meaning | Source | Tradable |
+|---|---|---|---|
+| Discovered | a real Pons launch that passes the eligibility rules | Pons factory | no ("Pons · not registered") |
+| Registered | `RiskManager` has enabled a market for that token address | Marginpad chain | only with a fresh oracle price |
+| Tradable | registered, not graduated, fresh Marginpad oracle price | Marginpad chain | yes |
+| Graduated | the curve graduated (or the oracle froze the market) | Pons / oracle | no new positions |
+
+- One rule set, one implementation: `src/pons/eligibility.ts` (used by the app, `npm run pons:prepare` and `pons:register`).
+- `src/pons/discover.ts`: polls once a minute while /trade is open, scans only new blocks, reads a launch's fixed facts once (cached in localStorage), reads a bounded
+  number of live curves per poll a few at a time, and never batches JSON-RPC (the public RPC mishandles batches). A transport error is retried; only a contract revert
+  rejects a launch for good.
+- The price shown for a discovered-only market is the Pons curve price, for reference. Registered markets show, and trade at, the Marginpad oracle price.
+- Local and testnet: Pons markets first (tradable, registered, discovered, graduated), then the native demo markets. Mainnet: no demo markets, and only markets Marginpad has registered
+  (nothing registered = the "no markets yet" page).

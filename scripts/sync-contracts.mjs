@@ -29,11 +29,11 @@ function deployBlock(chainId) {
   return blocks.length ? Math.min(...blocks) : 0
 }
 
-const targets = { 46630: 'deployments.json', 31337: 'deployments.local.json' }
+const targets = { 46630: 'deployments.json', 4663: 'deployments.mainnet.json', 31337: 'deployments.local.json' }
 for (const [chainId, fileName] of Object.entries(targets)) {
   const src = path.join(root, `contracts/deployments/${chainId}.json`)
   if (!fs.existsSync(src)) {
-    if (chainId === '46630' && !fs.existsSync(path.join(dest, fileName))) fs.writeFileSync(path.join(dest, fileName), '{}\n')
+    if (chainId !== '31337' && !fs.existsSync(path.join(dest, fileName))) fs.writeFileSync(path.join(dest, fileName), '{}\n')
     continue
   }
   const d = JSON.parse(fs.readFileSync(src, 'utf8'))

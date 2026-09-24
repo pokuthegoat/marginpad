@@ -38,3 +38,4 @@ src/chain/deployments.local.json
 .env
 .env.*
 !.env.example
+src/chain/pons-markets.local.json

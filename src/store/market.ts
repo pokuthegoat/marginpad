@@ -19,6 +19,18 @@ export interface Token {
   vol: number
   /** Maintenance margin as a share of position size */
   maintenance: number
+  /** Where the market comes from. Undefined means a native Marginpad demo market. */
+  source?: 'demo' | 'pons'
+  /** Registered as a market on the Marginpad testnet contracts (so it can be traded). Pons markets only. */
+  registered?: boolean
+  /** The Pons curve has graduated (or Marginpad marked the market graduated): no new positions. Pons markets only. */
+  graduated?: boolean
+  /** discovered (eligible on Pons) < registered (enabled in Marginpad RiskManager) < tradable (registered, fresh oracle price). */
+  ponsState?: 'discovered' | 'registered' | 'tradable' | 'graduated'
+  /** Market id on the Marginpad contracts. Demo markets use the address from deployments.json instead. */
+  address?: string
+  /** 'unavailable' when no reliable price exists (Pons-derived markets in this MVP) */
+  priceStatus?: 'live' | 'unavailable'
 }
 
 export const TOKENS: Token[] = [
@@ -49,7 +61,21 @@ export const TOKENS: Token[] = [
   },
 ]
 
-export const tokenById = (id: string) => TOKENS.find((t) => t.id === id)!
+/** Markets added at runtime (Pons launches). The static demo list above is never modified. */
+let extraMarkets: Token[] = []
+export const setExtraMarkets = (tokens: Token[]) => {
+  extraMarkets = tokens
+}
+
+/** Mainnet deployments have no demo markets, so the demo list is switched off there (see StoreProvider). */
+let demoEnabled = true
+export const setDemoMarketsEnabled = (enabled: boolean) => {
+  demoEnabled = enabled
+}
+
+export const allMarkets = () => [...(demoEnabled ? TOKENS : []), ...extraMarkets]
+
+export const tokenById = (id: string) => (TOKENS.find((t) => t.id === id) ?? extraMarkets.find((t) => t.id === id))!
 
 export interface PositionShape {
   side: Side
@@ -86,7 +112,7 @@ export function isLiquidated(p: PositionShape & { liq: number }, price: number) 
  * maintenance margin and the pool cap; the constants above are only the starting values and the display metadata.
  */
 export function applyOnchainRisk(id: string, r: { maxLeverage: number; maintenance: number; poolCap: number }) {
-  const t = TOKENS.find((x) => x.id === id)
+  const t = allMarkets().find((x) => x.id === id)
   if (!t) return
   t.maxLeverage = r.maxLeverage
   t.maintenance = r.maintenance
