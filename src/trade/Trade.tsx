@@ -1,9 +1,20 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Row, Segmented, Slider } from '../components/controls'
 import { useStore } from '../store/StoreContext'
+import ChainNotice from '../chain/ChainNotice'
 import { fmtCompact, fmtEth, fmtPct, fmtPrice, fmtSignedEth, floor4 } from '../store/format'
-import { TOKENS, liquidationPrice, pnlFor, sizeFor, tokenById, type Side, type Token } from '../store/market'
+import { TOKENS, isLiquidated, liquidationPrice, pnlFor, sizeFor, tokenById, type Side, type Token } from '../store/market'
 import { LP_PROFIT_SHARE, borrowRoom, closeOutcome, validateOpen, type Settlement } from '../store/store'
+import {
+  LOW_LEVERAGE_MAX,
+  NO_FILTERS,
+  SORT_LABEL,
+  filterMarkets,
+  isFiltered,
+  type LeverageFilter,
+  type MarketQuery,
+  type SortKey,
+} from './filter'
 
 function Sparkline({ points }: { points: number[] }) {
   const min = Math.min(...points)
@@ -66,11 +77,18 @@ function SettlementCard({ s }: { s: Settlement }) {
 }
 
 export default function Trade() {
-  const { state, actions } = useStore()
+  const { state, actions, chain } = useStore()
+  const ready = chain.status === 'ready' && chain.connected && !chain.busy
   const [selectedId, setSelectedId] = useState(TOKENS[1].id)
   const [side, setSide] = useState<Side>('long')
   const [amountText, setAmountText] = useState('')
   const [leverage, setLeverage] = useState(1.5)
+  const [mq, setMq] = useState<MarketQuery>(NO_FILTERS)
+
+  // The market list under the search box. This only changes which chips are shown: the selected market, its card and
+  // the ticket below are untouched (and stay put even if the selected market is filtered out of the list).
+  const visibleMarkets = useMemo(() => filterMarkets(TOKENS, state.prices, mq), [state.prices, mq])
+  const clearMarketFilters = () => setMq(NO_FILTERS)
 
   const token = tokenById(selectedId)
   const price = state.prices[token.id]
@@ -84,7 +102,7 @@ export default function Trade() {
   const liqDistance = Math.abs(liq - price) / price
 
   const error = amountOk ? validateOpen(state, token.id, amount, leverage) : null
-  const canOpen = amountOk && !error
+  const canOpen = amountOk && !error && ready
 
   const selectToken = (t: Token) => {
     setSelectedId(t.id)
@@ -94,7 +112,7 @@ export default function Trade() {
   const open = (e: React.FormEvent) => {
     e.preventDefault()
     if (!canOpen) return
-    actions.open(token.id, side, amount, leverage)
+    void actions.open(token.id, side, amount, leverage)
     setAmountText('')
   }
 
@@ -107,11 +125,95 @@ export default function Trade() {
         <p className="eyebrow">Trade</p>
         <h1 className="t-h1">Open a leveraged position</h1>
         <p className="lead">Choose a market and your collateral. The pool funds the rest.</p>
+        <ChainNotice />
       </div>
 
-      <div className="chips" aria-label="Markets">
+      <section className="market-tools" aria-label="Find a market">
+        <div className="search">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="m16 16 4.5 4.5" />
+          </svg>
+          <input
+            type="search"
+            className="text-input search-input"
+            placeholder="Search by name or symbol"
+            aria-label="Search markets by name or symbol"
+            value={mq.query}
+            onChange={(e) => setMq({ ...mq, query: e.target.value })}
+            autoComplete="off"
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+          {mq.query && (
+            <button type="button" className="search-clear" aria-label="Clear search" onClick={() => setMq({ ...mq, query: '' })}>
+              ×
+            </button>
+          )}
+        </div>
+
+        <div className="tools-row">
+          <Segmented<LeverageFilter>
+            label="Filter by leverage"
+            value={mq.filter}
+            onChange={(filter) => setMq({ ...mq, filter })}
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'low', label: 'Lower leverage' },
+              { value: 'high', label: 'Higher leverage' },
+            ]}
+          />
+          <div className="sort">
+            <label className="sr" htmlFor="market-sort">
+              Sort markets by
+            </label>
+            <select
+              id="market-sort"
+              className="select"
+              value={mq.sortKey}
+              onChange={(e) => setMq({ ...mq, sortKey: e.target.value as SortKey })}
+            >
+              {(Object.keys(SORT_LABEL) as SortKey[]).map((k) => (
+                <option key={k} value={k}>
+                  {k === 'default' ? 'Sort: default' : SORT_LABEL[k]}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn btn-glass sort-dir"
+              disabled={mq.sortKey === 'default'}
+              aria-label={mq.sortDir === 'desc' ? 'High to low. Switch to low to high' : 'Low to high. Switch to high to low'}
+              title={mq.sortDir === 'desc' ? 'High to low' : 'Low to high'}
+              onClick={() => setMq({ ...mq, sortDir: mq.sortDir === 'desc' ? 'asc' : 'desc' })}
+            >
+              {mq.sortDir === 'desc' ? '↓' : '↑'}
+            </button>
+          </div>
+        </div>
+
+        <p className="help tools-count" aria-live="polite">
+          Showing {visibleMarkets.length} of {TOKENS.length} markets
+          {mq.filter !== 'all' && ` · max leverage ${mq.filter === 'low' ? 'up to' : 'above'} ${LOW_LEVERAGE_MAX}x`}
+          {mq.sortKey !== 'default' && ` · ${SORT_LABEL[mq.sortKey]}, ${mq.sortDir === 'desc' ? 'high to low' : 'low to high'}`}
+        </p>
+      </section>
+
+      {visibleMarkets.length === 0 && (
+        <div className="empty market-empty" role="status">
+          <p>{mq.query.trim() ? `No markets match “${mq.query.trim()}”.` : 'No markets match these filters.'}</p>
+          <p className="small">Try a different name or symbol, or clear the filters.</p>
+          {isFiltered(mq) && (
+            <button type="button" className="btn btn-glass btn-sm" onClick={clearMarketFilters}>
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="chips" aria-label="Markets" hidden={visibleMarkets.length === 0}>
         <div className="chips-inner">
-          {TOKENS.map((t) => (
+          {visibleMarkets.map((t) => (
             <button
               key={t.id}
               type="button"
@@ -158,15 +260,17 @@ export default function Trade() {
             <dd className="num">{fmtEth(room)}</dd>
           </div>
         </dl>
+        {chain.isOracleOwner && (
         <div className="demo-ctl">
-          <span>Demo: move the {token.symbol} price</span>
+          <span>Testnet oracle: move the {token.symbol} price</span>
           {[-0.5, -0.3, -0.1, 0.1, 0.3].map((pct) => (
-            <button key={pct} type="button" className="btn btn-glass btn-sm" onClick={() => actions.nudge(token.id, pct)}>
+            <button key={pct} type="button" className="btn btn-glass btn-sm" disabled={chain.busy} onClick={() => void actions.nudge(token.id, pct)}>
               {pct > 0 ? '+' : ''}
               {pct * 100}%
             </button>
           ))}
         </div>
+        )}
       </section>
 
       <form className="card ticket" onSubmit={open}>
@@ -260,11 +364,11 @@ export default function Trade() {
         </dl>
 
         <button type="submit" className={`btn btn-block btn-${side}`} disabled={!canOpen}>
-          Open Position
+          {chain.busy ? 'Waiting for transaction…' : 'Open Position'}
         </button>
         <p className="fine">
           Your collateral absorbs losses first. If a trade closes in profit, 5% of the profit goes to pool providers.
-          Mock data only.
+          Robinhood Chain testnet only. No real funds.
         </p>
       </form>
 
@@ -325,7 +429,17 @@ export default function Trade() {
                     <Row label="You receive" value={fmtEth(out.payout)} strong />
                     <Row label="Back to the pool" value={fmtEth(p.borrowed)} />
                   </dl>
-                  <button type="button" className="btn btn-glass btn-block" onClick={() => actions.close(p.id)}>
+                  {isLiquidated(p, mark) && (
+                    <>
+                      <p className="help">
+                        This position is past its liquidation price. Anyone can liquidate it, which repays the pool.
+                      </p>
+                      <button type="button" className="btn btn-short btn-block" disabled={!ready} onClick={() => void actions.liquidate(p.id)}>
+                        Liquidate
+                      </button>
+                    </>
+                  )}
+                  <button type="button" className="btn btn-glass btn-block" disabled={!ready} onClick={() => void actions.close(p.id)}>
                     Close position
                   </button>
                 </li>

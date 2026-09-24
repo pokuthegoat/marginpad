@@ -83,6 +83,8 @@ export interface State {
   marketUsed: Record<string, number>
   prices: Record<string, number>
   history: Record<string, number[]>
+  /** Tokens whose oracle price is too old for the contracts to accept */
+  stale: Record<string, boolean>
   positions: Position[]
   settlements: Settlement[]
   activity: ActivityEntry[]
@@ -124,6 +126,7 @@ export function createInitialState(now = Date.now(), rng: () => number = Math.ra
     marketUsed,
     prices,
     history,
+    stale: {},
     positions: [],
     settlements: [],
     activity: [
@@ -138,12 +141,46 @@ export function createInitialState(now = Date.now(), rng: () => number = Math.ra
   }
 }
 
+/** Empty state for before the first chain read (and when no wallet is connected): no balances, flat charts. */
+export function createBlankState(): State {
+  const prices: Record<string, number> = {}
+  const history: Record<string, number[]> = {}
+  const marketUsed: Record<string, number> = {}
+  for (const t of TOKENS) {
+    prices[t.id] = t.price
+    history[t.id] = [t.price, t.price]
+    marketUsed[t.id] = 0
+  }
+  return {
+    wallet: 0,
+    totalDeposits: 0,
+    rewardPool: 0,
+    userDeposit: 0,
+    userRewards: 0,
+    marketUsed,
+    prices,
+    history,
+    stale: {},
+    positions: [],
+    settlements: [],
+    activity: [],
+    notice: null,
+    nextId: 1,
+  }
+}
+
 /* ---------- Derived values ---------- */
 
 export const poolUsed = (s: State) => Object.values(s.marketUsed).reduce((a, b) => a + b, 0)
 export const poolAvailable = (s: State) => s.totalDeposits - poolUsed(s)
 export const utilization = (s: State) => (s.totalDeposits > 0 ? poolUsed(s) / s.totalDeposits : 0)
 export const userShare = (s: State) => (s.totalDeposits > 0 ? s.userDeposit / s.totalDeposits : 0)
+
+/**
+ * What the trader actually made or lost on a closed position: what came back to their wallet minus the collateral
+ * they put in. A profit is after the 5% LP share; a liquidation is the whole collateral.
+ */
+export const netResult = (s: Settlement) => s.payout - s.collateral
 
 /** What the user can pull out now without breaking the utilization limit. */
 export function withdrawable(s: State) {
@@ -197,6 +234,7 @@ export function closeOutcome(
 export function validateOpen(s: State, tokenId: string, collateral: number, leverage: number): string | null {
   const token = tokenById(tokenId)
   if (!(collateral > 0)) return null
+  if (s.stale[tokenId]) return `The ${token.symbol} oracle price is out of date. Ask the testnet oracle operator to push a new price.`
   if (collateral < MIN_COLLATERAL) return `The minimum is ${fmtEth(MIN_COLLATERAL)}.`
   if (collateral > s.wallet + EPS) return `You only have ${fmtEth(s.wallet)} in your wallet.`
   if (leverage < 1 - EPS || leverage > token.maxLeverage + EPS)

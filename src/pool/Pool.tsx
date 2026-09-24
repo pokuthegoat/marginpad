@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Row, Segmented } from '../components/controls'
 import { useStore } from '../store/StoreContext'
+import ChainNotice from '../chain/ChainNotice'
 import { floor4, fmtEth, fmtPct, fmtTime } from '../store/format'
 import { TOKENS } from '../store/market'
 import {
@@ -26,7 +27,8 @@ function cleanInput(v: string) {
 }
 
 export default function Pool() {
-  const { state, actions } = useStore()
+  const { state, actions, chain } = useStore()
+  const ready = chain.status === 'ready' && chain.connected && !chain.busy
   const [tab, setTab] = useState<'deposit' | 'withdraw'>('deposit')
   const [amountText, setAmountText] = useState('')
 
@@ -40,7 +42,7 @@ export default function Pool() {
   const amount = parseAmount(amountText)
   const isDeposit = tab === 'deposit'
   const error = isDeposit ? validateDeposit(state, amount) : validateWithdraw(state, amount)
-  const canSubmit = amount > 0 && !error
+  const canSubmit = amount > 0 && !error && ready
 
   const newTotal = isDeposit ? total + amount : total - amount
   const newDeposit = isDeposit ? deposit + amount : deposit - amount
@@ -50,8 +52,8 @@ export default function Pool() {
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!canSubmit) return
-    if (isDeposit) actions.deposit(amount)
-    else actions.withdraw(amount)
+    if (isDeposit) void actions.deposit(amount)
+    else void actions.withdraw(amount)
     setAmountText('')
   }
 
@@ -73,6 +75,7 @@ export default function Pool() {
         <p className="eyebrow">Margin Pool</p>
         <h1 className="t-h1">One pool. Every market.</h1>
         <p className="lead">Shared Robinhood ETH that funds leveraged positions across every Marginpad market.</p>
+        <ChainNotice />
       </div>
 
       <dl className="pstats">
@@ -128,7 +131,7 @@ export default function Pool() {
               <dd className="num">{fmtEth(canWithdraw)}</dd>
             </div>
           </dl>
-          <button type="button" className="btn btn-glass btn-block" onClick={actions.claim} disabled={rewards <= 0}>
+          <button type="button" className="btn btn-glass btn-block" onClick={() => void actions.claim()} disabled={rewards <= 0 || !ready}>
             Claim rewards
           </button>
           <p className="help" style={{ textAlign: 'center' }}>
@@ -202,9 +205,9 @@ export default function Pool() {
             </dl>
 
             <button type="submit" className="btn btn-block btn-primary" disabled={!canSubmit}>
-              {isDeposit ? 'Confirm deposit' : 'Confirm withdrawal'}
+              {chain.busy ? 'Waiting for transaction…' : isDeposit ? 'Confirm deposit' : 'Confirm withdrawal'}
             </button>
-            <p className="fine">Mock data only. No wallet is connected and no real ETH moves.</p>
+            <p className="fine">Robinhood Chain testnet only. No real funds.</p>
           </form>
 
           {notice && (

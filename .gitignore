@@ -25,3 +25,16 @@ dist-ssr
 
 # data/ holds the local SQLite database used in development. Production uses Turso.
 data/
+
+# Foundry (smart contracts live in contracts/)
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/.env
+contracts/deployments/31337.json
+src/chain/deployments.local.json
+
+# Environment files: never commit real values. Only .env.example is tracked.
+.env
+.env.*
+!.env.example

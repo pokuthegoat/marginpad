@@ -1,15 +1,23 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import type { AccountDTO } from '../lib/account-types'
 import { DISPLAY_NAME_MAX, USERNAME_MAX, validateDisplayName, validateUsername } from '../lib/profile-rules'
 import ConnectWallet from '../components/ConnectWallet'
 import { useAccount } from '../components/account/AccountProvider'
 import { ApiError } from '../components/account/api-error'
 import { ProfileAvatar } from '../components/account/ProfileAvatar'
+import { useStore } from '../store/StoreContext'
+import { fmtSignedEth } from '../store/format'
+import { tokenById } from '../store/market'
+import { netResult } from '../store/store'
 
 const formatDate = (ms: number) =>
   new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(ms))
 
 const formatDay = (ms: number) => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(ms))
+
+const formatTradeTime = (ms: number) =>
+  new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ms))
 
 function formatRemaining(ms: number) {
   const mins = Math.max(1, Math.ceil(ms / 60000))
@@ -65,6 +73,72 @@ function Notice({ title, body, children }: { title: string; body?: string; child
       <h1 className="t-h1">{title}</h1>
       {body && <p className="lead">{body}</p>}
       {children && <div className="notice-actions">{children}</div>}
+    </section>
+  )
+}
+
+/** How many closed trades the dashboard shows before "View all". */
+const RECENT_TRADES = 5
+
+/**
+ * The 5 most recent closed trades, straight from the shared trade state (the same list the Trade page keeps when a
+ * position is closed or liquidated). Newest first. P&L is what the trader actually made or lost after the 5% LP share.
+ */
+function RecentTrades() {
+  const { state } = useStore()
+  const trades = state.settlements.slice(0, RECENT_TRADES)
+
+  return (
+    <section className="card dash-card" aria-labelledby="recent-h">
+      <h2 id="recent-h" className="h-center">
+        Recent trades
+      </h2>
+
+      {trades.length === 0 ? (
+        <div className="empty trades-empty">
+          <p>No closed trades yet.</p>
+          <p className="small">Trades you close or that get liquidated will show up here.</p>
+          <Link to="/trade" className="btn btn-primary btn-sm">
+            Open a trade
+          </Link>
+        </div>
+      ) : (
+        <ul className="trade-list">
+          {trades.map((t) => {
+            const token = tokenById(t.tokenId)
+            const net = netResult(t)
+            const tone = net > 0 ? 'gain' : net < 0 ? 'loss' : ''
+            return (
+              <li key={t.id} className={`trade-row ${tone}`}>
+                <div className="trade-main">
+                  <b className="trade-sym">{token.symbol}</b>
+                  <span className={`badge badge-${t.side}`}>{t.side === 'long' ? 'Long' : 'Short'}</span>
+                  <span className="badge num">{t.leverage.toFixed(1)}x</span>
+                  {t.kind === 'liquidated' && <span className="badge badge-short">Liquidated</span>}
+                </div>
+                <time className="trade-time" dateTime={new Date(t.at).toISOString()}>
+                  {formatTradeTime(t.at)}
+                </time>
+                <div className={`trade-pnl num ${tone}`}>
+                  <span className="sr">{net > 0 ? 'Profit: ' : net < 0 ? 'Loss: ' : 'Break-even: '}</span>
+                  <span aria-hidden="true" className="trade-arrow">
+                    {net > 0 ? '▲' : net < 0 ? '▼' : ''}
+                  </span>
+                  {fmtSignedEth(net)}
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+
+      <div className="trades-foot">
+        {/* A full trade history page doesn't exist yet, so this is a placeholder for it. */}
+        <button type="button" className="btn btn-glass btn-sm" disabled title="The full trade history is coming soon">
+          View all →
+        </button>
+        <p className="fine">Your closed and liquidated trades on the Robinhood Chain testnet.</p>
+      </div>
     </section>
   )
 }
@@ -266,6 +340,8 @@ function DashboardForm({ account }: { account: AccountDTO }) {
           )}
         </form>
       </section>
+
+      <RecentTrades />
     </>
   )
 }

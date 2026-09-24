@@ -80,3 +80,15 @@ export function pnlFor(p: PositionShape, price: number) {
 export function isLiquidated(p: PositionShape & { liq: number }, price: number) {
   return p.side === 'long' ? price <= p.liq : price >= p.liq
 }
+
+/**
+ * Sync one market's risk settings from the chain. The contract is the source of truth for max leverage,
+ * maintenance margin and the pool cap; the constants above are only the starting values and the display metadata.
+ */
+export function applyOnchainRisk(id: string, r: { maxLeverage: number; maintenance: number; poolCap: number }) {
+  const t = TOKENS.find((x) => x.id === id)
+  if (!t) return
+  t.maxLeverage = r.maxLeverage
+  t.maintenance = r.maintenance
+  t.poolCap = r.poolCap
+}

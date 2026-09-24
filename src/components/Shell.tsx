@@ -83,8 +83,8 @@ export default function Shell() {
             {account?.setupComplete && <NavLink to="/dashboard">Dashboard</NavLink>}
           </nav>
           <div className="nav-right">
-            <div className="wallet" title="Demo balance. Trades and the pool use mock data only.">
-              <span>Demo</span>
+            <div className="wallet" title="Your testnet ETH balance">
+              <span>Testnet</span>
               <b className="num">{fmtEth(state.wallet)}</b>
             </div>
             <ConnectWallet />

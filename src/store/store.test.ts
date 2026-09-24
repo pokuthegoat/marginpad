@@ -4,6 +4,7 @@ import {
   borrowRoom,
   closeOutcome,
   createInitialState,
+  netResult,
   poolAvailable,
   poolUsed,
   reducer,
@@ -189,5 +190,40 @@ describe('closeOutcome', () => {
     const o = closeOutcome(p, 0.9, 'closed')
     expect(o.payout).toBeCloseTo(1.6)
     expect(o.toLps).toBe(0)
+  })
+})
+
+describe('closed-trade history (what the dashboard lists)', () => {
+  const closeFirst = (s: State) => reducer(s, { type: 'CLOSE', id: s.positions[0].id, at: AT })
+
+  it('a profit is reported after the 5% LP share', () => {
+    let s = open(fresh(), 'ferry', 'long', 2, 2)
+    s = closeFirst(nudge(s, 'ferry', 0.1)) // +0.4 profit, 0.02 to LPs
+    expect(netResult(s.settlements[0])).toBeCloseTo(0.38)
+  })
+
+  it('a loss is what the collateral absorbed', () => {
+    let s = open(fresh(), 'ferry', 'long', 2, 2)
+    s = closeFirst(nudge(s, 'ferry', -0.1))
+    expect(netResult(s.settlements[0])).toBeCloseTo(-0.4)
+  })
+
+  it('a liquidation loses the whole collateral, and so does a gap that eats through it', () => {
+    const liquidated = nudge(open(fresh(), 'ferry', 'long', 2, 2), 'ferry', -0.45)
+    expect(liquidated.settlements[0].kind).toBe('liquidated')
+    expect(netResult(liquidated.settlements[0])).toBeCloseTo(-2)
+    const gapped = nudge(open(fresh(), 'ferry', 'long', 2, 2), 'ferry', -0.8)
+    expect(netResult(gapped.settlements[0])).toBeCloseTo(-2)
+  })
+
+  it('keeps the newest trade first, with its side, leverage and time', () => {
+    let s = fresh()
+    s = open(s, 'ferry', 'long', 1, 2)
+    s = reducer(s, { type: 'CLOSE', id: s.positions[0].id, at: 5_000 })
+    s = open(s, 'tidal', 'short', 1, 3)
+    s = reducer(s, { type: 'CLOSE', id: s.positions[0].id, at: 9_000 })
+    expect(s.settlements.map((t) => t.tokenId)).toEqual(['tidal', 'ferry'])
+    expect(s.settlements[0]).toMatchObject({ side: 'short', leverage: 3, at: 9_000 })
+    expect(s.settlements[1]).toMatchObject({ side: 'long', leverage: 2, at: 5_000 })
   })
 })
